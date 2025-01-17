@@ -1,10 +1,17 @@
 export VERBOSE=1
 #export NVCC_THREADS=8
-export CUDA_HOME=/usr/local/cuda-12
+
+source /data/tongping/miniconda3/bin/activate vllm_source
+
+export CUDA_HOME=/usr/local/cuda-12.4
 export TORCH_CUDA_ARCH_LIST="8.0"
-export CUDACXX=/usr/local/cuda/bin/nvcc 
-export PATH=/usr/local/cuda/bin:$PATH
-export PYTHONPATH=/usr/local/lib/python3.9/dist-packages/:$PYTHONPATH
+export CUDACXX=$CUDA_HOME/bin/nvcc
+export PATH=$CUDA_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+
+# export PYTHONPATH=/usr/local/lib/python3.9/dist-packages/:$PYTHONPATH
+# Ensure the Python path includes the site-packages directory of your environment
+export PYTHONPATH=$(python -c "import site; print(site.getsitepackages()[0])"):$PYTHONPATH
 
 #cd ./build
 #/usr/local/cuda/bin/nvcc -forward-unknown-to-host-compiler -DCUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1 -DPy_LIMITED_API=3 -DTORCH_EXTENSION_NAME=_C -D_C_EXPORTS -I/root/vllm/csrc -I/root/vllm/build/_deps/cutlass-src/include -isystem /usr/include/python3.9 -isystem /usr/local/lib/python3.9/dist-packages/torch/include -isystem /usr/local/lib/python3.9/dist-packages/torch/include/torch/csrc/api/include -isystem /usr/local/cuda/include --expt-extended-lambda -O2 -g -Xptxas=-v --keep -std=c++17 --generate-code=arch=compute_80,code=[sm_80] -Xcompiler=-fPIC --expt-relaxed-constexpr -D_GLIBCXX_USE_CXX11_ABI=0 -MD -MT CMakeFiles/_C.dir/csrc/attention/attention_kernels.cu.o -MF CMakeFiles/_C.dir/csrc/attention/attention_kernels.cu.o.d -x cu -c /root/vllm/csrc/attention/attention_kernels.cu -o CMakeFiles/_C.dir/csrc/attention/attention_kernels.cu.o
