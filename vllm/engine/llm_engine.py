@@ -413,7 +413,7 @@ class LLMEngine:
                 self.async_callbacks[v_id]
                 if model_config.use_async_output_proc else None)
             for v_id in range(parallel_config.pipeline_parallel_size)
-        ]
+        ]   # Normally, we only have one scheduler
 
         # Add for supporting dAttention
         self.step_index = 0
@@ -697,7 +697,7 @@ class LLMEngine:
             scheduler.get_num_unfinished_seq_groups()
             for scheduler in self.scheduler
         ]
-        min_cost_scheduler = self.scheduler[costs.index(min(costs))]
+        min_cost_scheduler = self.scheduler[costs.index(min(costs))]    # find the min cost scheduler and add the seq_group to it
         min_cost_scheduler.add_seq_group(seq_group)
 
     def stop_remote_worker_execution_loop(self) -> None:
@@ -1207,7 +1207,7 @@ class LLMEngine:
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
         if not self._has_remaining_steps(seq_group_metadata_list):
-            # Schedule iteration
+            # Schedule iteration, key information is stored in the context
             (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc
              ) = self.scheduler[virtual_engine].schedule()
@@ -1316,7 +1316,7 @@ class LLMEngine:
 
             # Check if need to run the usual non-async path
             if not allow_async_output_proc:
-                self._process_model_outputs(ctx=ctx)
+                self._process_model_outputs(ctx=ctx)    # update the ctx.request_outputs here
 
                 # Log stats.
                 self.do_log_stats(scheduler_outputs, outputs)

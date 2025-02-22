@@ -671,7 +671,7 @@ class LLM:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         request_id = str(next(self.request_counter))
-        self.llm_engine.add_request(
+        self.llm_engine.add_request(    # Add a request to the engine's request pool
             request_id,
             inputs,
             params,

@@ -41,8 +41,10 @@ class CPUCacheAllocator:
 
                 # Update free blocks
                 if allocated_end < end:
+                    # split the free block into two parts, and update the current free_blocks
                     self.free_blocks[i] = (allocated_end + 1, end)
                 else:
+                    # the size are equal
                     self.free_blocks.pop(i)
 
                 # Track allocated blocks
@@ -50,6 +52,7 @@ class CPUCacheAllocator:
                 return allocated_start
 
         # No sufficient free range found
+        print(f"ERROR: No sufficient free range found for {num_blocks} blocks", file=sys.stderr)
         return None
 
     def free(self, start_block):
@@ -104,7 +107,7 @@ class CacheAllocator:
         return cache_id
 
     def free(self, cache_id: int):
-        self.kv_caches.appendleft(cache_id)
+        self.kv_caches.appendleft(cache_id)     # xmc: why do we need to appendleft here? which means the most recent cache_id will be free first
 
         #assert cache_id == self.kv_caches[0]
         #print(f"after free-{cache_id} of {self.type}, the left item:{self.kv_caches[0]} ", file=sys.stderr)
@@ -129,7 +132,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         watermark: float = 0.03,
         sliding_window: Optional[int] = None, # Not supported
         enable_caching: bool = False, # Not supported
-        vmm_frequency: int = 8, 
+        vmm_frequency: int = 8,       # 8 steps for an epoch
         num_caches: int = 0,
     ) -> None:
         self.block_size = block_size
@@ -148,7 +151,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         print(f"self.num_free_cpu_blocks-{self.num_free_cpu_blocks}, vmm_frequency-{vmm_frequency}", file=sys.stderr)
         # use to alloc cache buffer id for seq
-        self.gpu_allocator = CacheAllocator("cuda", num_gpu_caches)
+        self.gpu_allocator = CacheAllocator("cuda", num_gpu_caches)     # xmc: num_gpu_'caches' is the number of cache buffer, not the number of blocks
         self.cpu_allocator = CPUCacheAllocator(num_cpu_blocks)
 
         # Watermark indicates that the least amount of blocks should be free. 
@@ -559,7 +562,11 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         immediate_allocate = self.immediate_allocate
         self.immediate_allocate = False
 
-        #print(f"in the end step-{self.step_index} with requests:{self.total_active_reqs}, allocate_blocks:{len(self.to_allocate_blocks)} now!", file=sys.stderr) 
+        if self.step_index == 458:
+            print("stop here")
+        
+        # print debug information
+        print(f"in the end step-{self.step_index} with requests:{self.total_active_reqs}, allocate_blocks:{len(self.to_allocate_blocks)} now!", file=sys.stderr) 
         # We will perform virtual memory management once for every self.vmm_frequency 
         if ((self.step_index & self.vmm_frequency_mask)) and (immediate_allocate != True):
             # No need to invoke virtual memory management

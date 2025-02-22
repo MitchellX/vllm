@@ -304,7 +304,30 @@ def scheduled_seq_group_builder():
 
 
 class Scheduler:
+    '''
+    Flow of Requests
+    1. New Requests:
+        Start in self.waiting
+        Move to self.running when scheduled
+    2. Running Requests:
+        Can be preempted → Move back to self.waiting
+        Can be swapped out → Move to self.swapped
+        Continue running → Stay in self.running
+    3. Swapped Requests (with dAttn):
+        # When swapping out
+        self.swapping_out.append(seq_group)  # Temporary state
+        self.swapped.append(seq_group)       # Final state
 
+        # When swapping in
+        self.swapping_in.append(seq_group)   # Temporary state
+        self.running.append(seq_group)       # Final state
+
+    * Queue Priority *
+    1. Prefill requests (if no swapped requests)
+    2. Decode requests from running queue
+    3. Swapped requests (if any space available)
+
+    '''
     def __init__(
         self,
         scheduler_config: SchedulerConfig,
@@ -361,7 +384,7 @@ class Scheduler:
                 num_cpu_blocks=num_cpu_blocks,
                 sliding_window=self.cache_config.sliding_window,
                 enable_caching=self.cache_config.enable_prefix_caching,
-                num_caches=self.scheduler_config.max_num_seqs,
+                num_caches=self.scheduler_config.max_num_seqs,      # Maximum number of sequences
                 vmm_frequency = self.vmm_frequency, 
                 )
         # Sequence groups in the WAITING state.
@@ -526,7 +549,7 @@ class Scheduler:
         return self.block_manager.get_prefix_cache_hit_rate(device)
 
     def get_num_unfinished_seq_groups(self) -> int:
-        return len(self.waiting) + len(self.running) + len(self.swapped)
+        return len(self.waiting) + len(self.running) + len(self.swapped)    # xmc: do we need to consider swapping_in and swapping_out here?
 
     def get_and_reset_finished_requests_ids(self) -> List[str]:
         """Flushes the list of request ids of previously finished seq_groups."""
@@ -804,7 +827,7 @@ class Scheduler:
 
     # A new scheduling for dattn, where the swapped-in requests cannot be 
     # inserted into the running queue directly, as the memory is not yet prepared
-    # Instead, the next epoch can be 
+    # Instead, the next epoch can be used to insert the swapped-in requests.
     def _schedule_swapped_async(
         self,
         budget: SchedulingBudget,
@@ -840,7 +863,8 @@ class Scheduler:
                 continue
             
             #to_check = True
-            #print(f"NNNNNNNNNNN_schedule_running, swapping_in {seq_group.swapping_step_index},  adding seq_group-{seq_group.request_id} to self.running at step-{self.step_index}", file=sys.stderr)
+            print("self.swapping_in:", len(self.swapping_in), self.swapping_in, file=sys.stderr)
+            print(f"NNNNNNNNNNN_schedule_running, swapping_in {seq_group.swapping_step_index},  adding seq_group-{seq_group.request_id} to self.running at step-{self.step_index}", file=sys.stderr)
             for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPING):
                 seq.status = SequenceStatus.RUNNING
 
@@ -861,7 +885,8 @@ class Scheduler:
 
         # Check all requests in the swapped queue, check whether it is necessary to 
         # to swap in. 
-        swapped_queue = self.swapped
+        swapped_queue = self.swapped        # xmc: 说了从self.swapped里面取出来, 但是打印的日志显示, 这里并没有少
+        print(f"******* self.swapped:{len(self.swapped)} at step-{self.step_index}", file=sys.stderr)
         leftover_swapped: Deque[SequenceGroup] = deque()
         while swapped_queue:
             # NOTE: the swapping order is first-in-last-out
@@ -1096,23 +1121,23 @@ class Scheduler:
         running_scheduled = SchedulerRunningOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()
 
-        # If any requests are swapped, prioritized swapped requests.
+        # If any requests are swapped, prioritized swapped requests. Otherwise, schedule prefills.
         if not self.swapped:
             prefills = self._schedule_prefills(budget,
                                                curr_loras,
                                                enable_chunking=False)
 
-        # Don't schedule decodes if prefills are scheduled.
+        # Don't schedule decodes if prefills are scheduled. First attempts to schedule prefill requests. If no prefills, schedules decode requests.
         # NOTE: If `_schedule_prefills` doesn't enable chunking, self.running
         # only contains decode requests, not chunked prefills.
-        if len(prefills.seq_groups) == 0:
+        if len(prefills.seq_groups) == 0:   
             running_scheduled = self._schedule_running(budget,
                                                        curr_loras,
                                                        enable_chunking=False)
             # If any sequence group is preempted, do not swap in any sequence
             # group. because it means there's no slot for new running requests.
             if self.use_dattn and self.user_specified_preemption_mode == "swap":
-                swapped_in = self._schedule_swapped_async(budget, curr_loras)
+                swapped_in = self._schedule_swapped_async(budget, curr_loras)   # TODO: check the _schedule_swapped_async()
                 #if len(swapped_in.decode_seq_groups) > 0:
                 #    print(f"schedule_async, with len(swapped_in.decode_seq_groups)-{len(swapped_in.decode_seq_groups)} at step-{self.step_index}", file=sys.stderr) 
             elif len(running_scheduled.preempted) + len(
@@ -1125,16 +1150,22 @@ class Scheduler:
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
+        '''
+        Queue Priority
+        1. Prefill requests
+        2. Decode requests from running queue
+        3. Swapped requests (if any space available)
+        '''
         self.waiting.extendleft(running_scheduled.preempted)
         # Update new running requests.
         if len(prefills.seq_groups) > 0:
-            self.running.extend([s.seq_group for s in prefills.seq_groups])
+            self.running.extend([s.seq_group for s in prefills.seq_groups]) # add all the prefill_seq_groups first, as higher priority
 
-        self.running.extend(running_scheduled.decode_seq_groups_list)
+        self.running.extend(running_scheduled.decode_seq_groups_list) # add all the decode_seq_groups after prefill
 
         if len(swapped_in.decode_seq_groups) > 0:
             self.running.extend(
-                [s.seq_group for s in swapped_in.decode_seq_groups])
+                [s.seq_group for s in swapped_in.decode_seq_groups])    # add all the swapped_in requests after decode_seq_groups
 
         # Update swapped requests.
         self.swapped.extend(running_scheduled.swapped_out)
@@ -1149,12 +1180,12 @@ class Scheduler:
         # Merge lists
         num_prefill_groups = len(prefills.seq_groups)
         if num_prefill_groups > 0:
-            scheduled_seq_groups = prefills.seq_groups
+            scheduled_seq_groups = prefills.seq_groups  # scheduled_seq_groups includes (with proirity) prefill, running_scheduled.decode_seq_groups, and swapped_in.decode_seq_groups
             scheduled_seq_groups.extend(running_scheduled.decode_seq_groups)
         else:
             scheduled_seq_groups = running_scheduled.decode_seq_groups
         scheduled_seq_groups.extend(swapped_in.decode_seq_groups)
-
+        # blocks_to_copy inlucdes both blocks from running_scheduled and swapped_in
         blocks_to_copy = running_scheduled.blocks_to_copy
         blocks_to_copy.extend(swapped_in.blocks_to_copy)
 
@@ -1593,6 +1624,8 @@ class Scheduler:
             #print(f"_preempt_by_swap, request:{seq_group.request_id}, blocks_to_swap_out:{len(blocks_to_swap_out)}")
         else:
             raise AssertionError("Invalid preemption mode.")
+        
+        print("preemption_mode:", preemption_mode)
         return preemption_mode
 
     def _preempt_by_recompute(
@@ -1626,7 +1659,7 @@ class Scheduler:
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             seq.status = SequenceStatus.RUNNING
             #print(f"swap_in:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
-
+    # dattn's swap_in()
     def _swap_in_async(
         self,
         seq_group: SequenceGroup,
@@ -1635,7 +1668,7 @@ class Scheduler:
         mapping = self.block_manager.swap_in(seq_group)
         blocks_to_swap_in.extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
-            seq.status = SequenceStatus.SWAPPING
+            seq.status = SequenceStatus.SWAPPING    # SWAPPING , RUNNING
             #print(f"swap_in:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
         self.swapping_in.append(seq_group)
         seq_group.swapping_step_index = self.step_index
@@ -1656,7 +1689,7 @@ class Scheduler:
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
             #print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
-
+    # dattn's swap_out()
     def _swap_out_async(
         self,
         seq_group: SequenceGroup,
@@ -1671,10 +1704,15 @@ class Scheduler:
         mapping = self.block_manager.swap_out(seq_group)
         blocks_to_swap_out.extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            seq.status = SequenceStatus.SWAPPING
-            #print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
+            seq.status = SequenceStatus.SWAPPING    # SWAPPED, SWAPPING
+            print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
 
         seq_group.swapping_step_index = self.step_index
+        print(f"waiting size: {len(self.waiting)}, ", file=sys.stderr)
+        print(f"swapping_in size: {len(self.swapping_in)}, ", file=sys.stderr)
+        print(f"swapping_out size: {len(self.swapping_out)}, ", file=sys.stderr)
+        print(f"swapped size: {len(self.swapped)}, ", file=sys.stderr)
+        print(f"running size: {len(self.running)},", file=sys.stderr)
 
     def _passed_delay(self, now: float) -> bool:
         if self.prev_prompt:
