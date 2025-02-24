@@ -90,7 +90,7 @@ class CPUCacheAllocator:
                 merged_blocks.append((current_start, current_end))
 
         return merged_blocks
-
+# Each allocation returns a single cache ID regardless of how many blocks are needed
 class CacheAllocator:
     def __init__(self, name: str, num_caches: int):
         self.num_caches = num_caches
@@ -217,7 +217,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
     # This function is invoked only in the prefill phase
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
-        if (self.step_index & self.vmm_frequency_mask):
+        if (self.step_index & self.vmm_frequency_mask):     # 0 when step_index is 0, 8, 16, 24, etc. -> allocate every 8 steps
             return AllocStatus.LATER
     
         # FIXME(woosuk): Here we assume that all sequences in the group share
@@ -252,7 +252,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         need_blocks = self._predict_n_blocks(tokens=seq.get_len())
 
         self.immediate_allocate = True 
-        #print(f"NNOOOOOOWWW allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
+        print(f"NNOOOOOOWWW allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
         cache_id = self._allocate_gpu_cache(need_blocks)
         
         seq.cache_id = cache_id
@@ -303,14 +303,14 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             cache_id = self.gpu_allocator.allocate()
 
         self.allocated_gpu_blocks[cache_id] = need_blocks 
-
+        # xmc: When reusing a cache ID, we might find that, The cache has fewer/more blocks than we need
         # We need to adjust the number of blocks for this cache id
         # Here, we specifically differentiate to_allocate and to_free so that 
         # we could place to_free before to_allocate in the step() function
         if allocated_block_num < need_blocks:
-            self.to_allocate_blocks[cache_id] = need_blocks
+            self.to_allocate_blocks[cache_id] = need_blocks     # Mark that this cache needs to grow to 8 blocks
         elif allocated_block_num > need_blocks: 
-            self.to_free_blocks[cache_id] = need_blocks
+            self.to_free_blocks[cache_id] = need_blocks         # Mark that this cache should shrink to 8 blocks
 
         return cache_id
 
@@ -562,7 +562,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         immediate_allocate = self.immediate_allocate
         self.immediate_allocate = False
 
-        if self.step_index == 458:
+        if self.step_index == 415:
             print("stop here")
         
         # print debug information
@@ -612,7 +612,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
         self.to_free_gpu_caches.clear()
         self.to_free_blocks.clear()
-        self.to_allocate_blocks.clear()
+        self.to_allocate_blocks.clear()     # clear global variables, keep local variables
         self.cached_free_gpu_blocks = 0
 
         # Only update the step index for decoding steps

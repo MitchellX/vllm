@@ -1089,7 +1089,7 @@ class Scheduler:
         waiting_queue.extendleft(leftover_waiting_sequences)
         if len(seq_groups) > 0:
             self.prev_prompt = True
-
+        # return seq_groups
         return SchedulerPrefillOutputs(
             seq_groups=seq_groups,
             ignored_seq_groups=ignored_seq_groups,
@@ -1391,7 +1391,7 @@ class Scheduler:
                 seq_id = seq.seq_id
                 seq_data[seq_id] = seq.data
 
-                if not self.use_dattn:
+                if not self.use_dattn:      # we don't save block tables for dattn
                     block_tables[seq_id] = self.block_manager.get_block_table(seq)
                     self.block_manager.access_all_blocks_in_seq(seq, now)
                 

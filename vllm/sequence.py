@@ -55,7 +55,7 @@ class SequenceStatus(enum.IntEnum):
     WAITING = 0
     RUNNING = 1
     SWAPPED = 2
-    SWAPPING = 7
+    SWAPPING = -1        # xmc: potential bug here
     # Note: anything after this will be considered
     # as a finished status.
     FINISHED_STOPPED = 3
@@ -64,7 +64,7 @@ class SequenceStatus(enum.IntEnum):
     FINISHED_IGNORED = 6
 
     @staticmethod
-    def is_finished(status: "SequenceStatus") -> bool:
+    def is_finished(status: "SequenceStatus") -> bool:  # return 
         return status > SequenceStatus.SWAPPED
 
     @staticmethod
