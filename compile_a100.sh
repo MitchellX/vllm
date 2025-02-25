@@ -4,7 +4,8 @@ export VERBOSE=1
 source /data/tongping/miniconda3/bin/activate vllm_xmc
 
 export CUDA_HOME=/usr/local/cuda-12.4
-export TORCH_CUDA_ARCH_LIST="8.0"
+# export TORCH_CUDA_ARCH_LIST="8.0"
+export TORCH_CUDA_ARCH_LIST="8.6"
 export CUDACXX=$CUDA_HOME/bin/nvcc
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH

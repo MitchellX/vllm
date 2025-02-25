@@ -252,7 +252,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         need_blocks = self._predict_n_blocks(tokens=seq.get_len())
 
         self.immediate_allocate = True 
-        print(f"NNOOOOOOWWW allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
+        print(f"Prefill: allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
         cache_id = self._allocate_gpu_cache(need_blocks)
         
         seq.cache_id = cache_id
@@ -399,8 +399,10 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
     # from can_allocate(). 
     def can_swap_in(self, seq_group: SequenceGroup,
                     num_lookahead_slots: int) -> AllocStatus:
-        
+        print(f"***** self.step_index-{self.step_index}, self.step_index & self.vmm_frequency_mask:   {self.step_index & self.vmm_frequency_mask}", file=sys.stderr)
         if (self.step_index & self.vmm_frequency_mask):
+            # [fixed] increase self.step_index to avoid infinite True returned
+            self.step_index += 1
             return AllocStatus.LATER
 
         need_blocks = num_lookahead_slots
@@ -562,11 +564,11 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         immediate_allocate = self.immediate_allocate
         self.immediate_allocate = False
 
-        if self.step_index == 415:
+        if self.step_index == 409:  # 400, 460
             print("stop here")
         
         # print debug information
-        print(f"in the end step-{self.step_index} with requests:{self.total_active_reqs}, allocate_blocks:{len(self.to_allocate_blocks)} now!", file=sys.stderr) 
+        print(f"in the end step-{self.step_index} with total active requests:{self.total_active_reqs}, allocate nums of cache blocks:{len(self.to_allocate_blocks)} now!", file=sys.stderr) 
         # We will perform virtual memory management once for every self.vmm_frequency 
         if ((self.step_index & self.vmm_frequency_mask)) and (immediate_allocate != True):
             # No need to invoke virtual memory management
@@ -616,9 +618,11 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self.cached_free_gpu_blocks = 0
 
         # Only update the step index for decoding steps
+        # [issue TODO] we intro duplicated self.step_index (eg. two step 41, 41) if immediate_allocate == True, every vmm_frequency steps
         if immediate_allocate == False:
             self.step_index += 1  
-
+            
+        
         return to_update_blocks, immediate_allocate
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
