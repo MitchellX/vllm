@@ -488,6 +488,14 @@ class LLMEngine:
         #num_gpu_blocks = 600
         print(f"num_gpu_blocks: {num_gpu_blocks}, num_cpu_blocks:{num_cpu_blocks}", file=sys.stderr)
         #num_cpu_blocks = 800 
+        
+        # shrink the num_gpu_blocks and num_cpu_blocks to be even number
+        # num_gpu_blocks = num_gpu_blocks // 4 * 2
+        # num_cpu_blocks = num_cpu_blocks // 4 * 2
+        # num_gpu_blocks = 200
+        # num_cpu_blocks = 800
+        print(f"num_gpu_blocks: {num_gpu_blocks}, num_cpu_blocks:{num_cpu_blocks}", file=sys.stderr)
+
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
             logger.info(

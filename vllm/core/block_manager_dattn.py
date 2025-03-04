@@ -187,6 +187,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
 
         # Track the step information, used for periodical memory management
         self.step_index = 0
+        
+        self.continuous_later_count = 0  # Add counter for tracking continuous LATER returns in can_swap_in()
     
     def _predict_n_blocks(self, tokens: int) -> int:
         if tokens == 0:
@@ -252,7 +254,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         need_blocks = self._predict_n_blocks(tokens=seq.get_len())
 
         self.immediate_allocate = True 
-        print(f"Prefill: allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
+        # print(f"Prefill: allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
         cache_id = self._allocate_gpu_cache(need_blocks)
         
         seq.cache_id = cache_id
@@ -395,15 +397,23 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         raise NotImplementedError("Forking is not supported in BlockSpaceManagerDAttn now.")
 
-    # This is to swap_in an pre-existing block, which is slightly different 
-    # from can_allocate(). 
+    # This is to swap_in an pre-existing block, which is slightly different rom can_allocate(). 
     def can_swap_in(self, seq_group: SequenceGroup,
                     num_lookahead_slots: int) -> AllocStatus:
-        print(f"***** self.step_index-{self.step_index}, self.step_index & self.vmm_frequency_mask:   {self.step_index & self.vmm_frequency_mask}", file=sys.stderr)
+        # print(f"***** self.step_index-{self.step_index}, self.step_index & self.vmm_frequency_mask:   {self.step_index & self.vmm_frequency_mask}", file=sys.stderr)
         if (self.step_index & self.vmm_frequency_mask):
-            # [fixed] increase self.step_index to avoid infinite True returned
-            self.step_index += 1
+            
+            # # [fixed] increase self.step_index to avoid infinite True returned
+            # self.continuous_later_count += 1
+            # # If we've returned LATER for vmm_frequency times, increment step_index
+            # if self.continuous_later_count > self.vmm_frequency:
+            #     self.step_index += 1
+            #     self.continuous_later_count = 0  # Reset counter
+                
             return AllocStatus.LATER
+
+        # Reset counter when we don't return LATER
+        self.continuous_later_count = 0
 
         need_blocks = num_lookahead_slots
         req_id = None
@@ -469,7 +479,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # real_gpu_blocks here in order to reduce the overhead involved in copy in swapping
             need_blocks = self._get_n_blocks(seq.get_len())
 
-            #print(f"SWAPOUT request-{seq.seq_id} with blocks-{need_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
+            print(f"SWAPOUT request-{seq.seq_id} with blocks-{need_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
 
             # Free the cache related to gpu_cache_id
             self._free_cache(cache_id=gpu_cache_id)
@@ -482,7 +492,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # After the swapped out, num_free_cpu_blocks should be decremented 
             self.num_free_cpu_blocks -= need_blocks
             
-            print(f"SWAPOUT request-{seq.seq_id} with blocks-{need_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
+            # print(f"SWAPOUT request-{seq.seq_id} with blocks-{need_blocks},  free GPU blocks:{self.num_free_gpu_blocks} at step-{self.step_index}", file=sys.stderr)
             
             to_swap_out_caches.append([gpu_cache_id, start_block, need_blocks]) 
 
@@ -568,7 +578,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             print("stop here")
         
         # print debug information
-        print(f"in the end step-{self.step_index} with total active requests:{self.total_active_reqs}, allocate nums of cache blocks:{len(self.to_allocate_blocks)} now!", file=sys.stderr) 
+        # print(f"in the end step-{self.step_index} with total active requests:{self.total_active_reqs}, allocate nums of cache blocks:{len(self.to_allocate_blocks)} now!", file=sys.stderr) 
         # We will perform virtual memory management once for every self.vmm_frequency 
         if ((self.step_index & self.vmm_frequency_mask)) and (immediate_allocate != True):
             # No need to invoke virtual memory management

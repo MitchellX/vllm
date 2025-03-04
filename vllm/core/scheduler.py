@@ -387,6 +387,7 @@ class Scheduler:
                 num_caches=self.scheduler_config.max_num_seqs,      # Maximum number of sequences
                 vmm_frequency = self.vmm_frequency, 
                 )
+            # print("vmm_frequency:", self.vmm_frequency)
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
         self.waiting: Deque[SequenceGroup] = deque()
@@ -538,8 +539,8 @@ class Scheduler:
         ret = len(self.waiting) != 0 or len(self.running) != 0 or len(
             self.swapped) != 0 or len(self.swapping_in) != 0        # Not sure if self.swapped is not empty
 
-        if ret == False:
-            print(f"len(self.waiting):{len(self.waiting)}, self.swapped:{len(self.swapped)}, self.swapping:{len(self.swapping_in)}, self.swapping_out:{len(self.swapping_out)} at step-{self.step_index}")
+        # if ret == False:
+        #     print(f"len(self.waiting):{len(self.waiting)}, self.swapped:{len(self.swapped)}, self.swapping:{len(self.swapping_in)}, self.swapping_out:{len(self.swapping_out)} at step-{self.step_index}")
         return ret
 
     def has_active_seqs(self) -> bool:
@@ -866,7 +867,7 @@ class Scheduler:
             
             #to_check = True
             # print("self.swapping_in:", len(self.swapping_in), self.swapping_in, file=sys.stderr)
-            print(f"NNNNNNNNNNN_schedule_running, swapping_in {seq_group.swapping_step_index},  adding seq_group-{seq_group.request_id} to self.running at step-{self.step_index}", file=sys.stderr)
+            # print(f"NNNNNNNNNNN_schedule_running, swapping_in {seq_group.swapping_step_index},  adding seq_group-{seq_group.request_id} to self.running at step-{self.step_index}", file=sys.stderr)
             for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPING):
                 seq.status = SequenceStatus.RUNNING
 
@@ -899,7 +900,7 @@ class Scheduler:
             is_prefill = seq_group.is_prefill()
 
             # If the sequence group cannot be swapped in, stop.
-            # [xmc: issue fixed] alloc_status always returns AllocStatus.LATER
+            # [issue fixed] alloc_status always returns AllocStatus.LATER
             alloc_status = self.block_manager.can_swap_in(
                 seq_group, self._get_num_lookahead_slots(is_prefill))
             if alloc_status == AllocStatus.LATER:
@@ -1635,7 +1636,7 @@ class Scheduler:
         else:
             raise AssertionError("Invalid preemption mode.")
         
-        print("preemption_mode:", preemption_mode)
+        # print("preemption_mode:", preemption_mode)
         return preemption_mode
 
     def _preempt_by_recompute(
@@ -1715,14 +1716,14 @@ class Scheduler:
         blocks_to_swap_out.extend(mapping)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPING    # SWAPPED, SWAPPING
-            print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
+            # print(f"swap_out:{seq.seq_id} blocks:{int(seq.get_len()/16)} step:{self.step_index}", file=sys.stderr)
 
         seq_group.swapping_step_index = self.step_index
-        print(f"waiting size: {len(self.waiting)}, ", file=sys.stderr)
-        print(f"swapping_in size: {len(self.swapping_in)}, ", file=sys.stderr)
-        print(f"swapping_out size: {len(self.swapping_out)}, ", file=sys.stderr)
-        print(f"swapped size: {len(self.swapped)}, ", file=sys.stderr)
-        print(f"running size: {len(self.running)},", file=sys.stderr)
+        # print(f"waiting size: {len(self.waiting)}, ", file=sys.stderr)
+        # print(f"swapping_in size: {len(self.swapping_in)}, ", file=sys.stderr)
+        # print(f"swapping_out size: {len(self.swapping_out)}, ", file=sys.stderr)
+        # print(f"swapped size: {len(self.swapped)}, ", file=sys.stderr)
+        # print(f"running size: {len(self.running)},", file=sys.stderr)
 
     def _passed_delay(self, now: float) -> bool:
         if self.prev_prompt:
