@@ -361,6 +361,8 @@ class Scheduler:
         BlockSpaceManagerImpl = BlockSpaceManager.get_block_space_manager_class(
             version)
 
+        print("block manager version: ", version)
+        
         num_gpu_blocks = cache_config.num_gpu_blocks
         if num_gpu_blocks:
             num_gpu_blocks //= pipeline_parallel_size

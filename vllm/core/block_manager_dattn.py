@@ -131,7 +131,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         num_cpu_blocks: int,
         watermark: float = 0.03,
         sliding_window: Optional[int] = None, # Not supported
-        enable_caching: bool = False, # Not supported
+        enable_caching: bool = False, # enable_prefix_caching, not supported by dAttn
         vmm_frequency: int = 8,       # 8 steps for an epoch
         num_caches: int = 0,
     ) -> None:
@@ -409,7 +409,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # if self.continuous_later_count > self.vmm_frequency:
             #     self.step_index += 1
             #     self.continuous_later_count = 0  # Reset counter
-                
+            # self.step_index += 1                
             return AllocStatus.LATER
 
         # Reset counter when we don't return LATER
