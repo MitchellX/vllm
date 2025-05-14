@@ -7,7 +7,6 @@
 
 from transformers import pipeline, set_seed
 from vllm import LLM, SamplingParams
-from time import time
 
 # Common prefix.
 prefix = (
@@ -107,20 +106,21 @@ prompts = [
     "I want you to act as a travel guide. I will write you my location and you will suggest a place to visit near my location. In some cases, I will also give you the type of places I will visit. You will also suggest me places of similar type that are close to my first location. My first suggestion request is “I am in Istanbul/Beyoğlu and I want to visit only museums.”",
 ]
 
-# prompts = [
-#     " I want you to act as a storyteller. You will come up with entertaining stories that are engaging, imaginative and captivating for the audience. It can be fairy tales, educational stories or any other type of stories which has the potential to capture people’s attention and imagination. Depending on the target audience, you may choose specific themes or topics for your storytelling session e.g., if it’s children then you can talk about animals; If it’s adults then history-based tales might engage them better etc. My first request is “I need an interesting story on perseverance.",
-# ]
+prompts = [
+    " I want you to act as a storyteller. You will come up with entertaining stories that are engaging, imaginative and captivating for the audience. It can be fairy tales, educational stories or any other type of stories which has the potential to capture people’s attention and imagination. Depending on the target audience, you may choose specific themes or topics for your storytelling session e.g., if it’s children then you can talk about animals; If it’s adults then history-based tales might engage them better etc. My first request is “I need an interesting story on perseverance.",
+]
 
 
 
 # prompts = prompts * 1
 # prompts = prompts * 4
-prompts = prompts * 8
+# prompts = prompts * 8
 # prompts = prompts * 10
 # prompts = prompts * 15
 
 generating_prompts = [prefix + prompt for prompt in prompts]
-generating_prompts = prompts
+
+# print(generating_prompts)
 
 
 set_seed(32)
@@ -129,35 +129,33 @@ import os
 os.environ['VLLM_ATTENTION_BACKEND'] = 'XFORMERS'
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com' 
 
-# Create a sampling params object.
-#sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=8192, ignore_eos=True)
-#sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=8192, ignore_eos=True)
-#sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=2048)
-#sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=2048)
-sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=16)
-# sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1, max_tokens=2048, )
-
-# Create an LLM.
-#llm = LLM(model="facebook/opt-6.7b")
-#llm = LLM(model="facebook/opt-6.7b", use_dattn=True)
-#llm = LLM(model="facebook/opt-6.7b", use_dattn=True, enforce_eager=True)
-#llm = LLM(model="Qwen/Qwen-7B", use_dattn=True, trust_remote_code=True, enforce_eager=True, preemption_mode="swap")
-# llm = LLM(model="facebook/opt-2.7B", use_dattn=True, enforce_eager=True, preemption_mode="swap", enable_prefix_caching=False)
-prefix_cached_llm = LLM(model="facebook/opt-6.7b", use_dattn=True,  enforce_eager=True, preemption_mode="swap",enable_prefix_caching=False) # [RECOMPUTE, SWAP]
+warmup_params = SamplingParams(temperature=0, top_p=1, top_k=1, max_tokens=1)   # 只 Prefill
+sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1, max_tokens=16)
 
 
-time1 = time()
+prefix_cached_llm = LLM(model="facebook/opt-6.7b",
+                        use_dattn=True,
+                        enforce_eager=True,
+                        preemption_mode="swap",         # [RECOMPUTE, SWAP]
+                        enable_prefix_caching=False)
+
 # Warmup so that the shared prompt's KV cache is computed.
-# prefix_cached_llm.generate(generating_prompts[0], sampling_params)
+prefix_cached_llm.generate(generating_prompts[0], warmup_params) # warmup_params -> no decode
 
-# prefix_cached_llm.llm_engine.scheduler[0].block_manager.offload_cache_to_cpu()
-# block_manager = prefix_cached_llm.llm_engine.scheduler[0].block_manager
+# scheduler = prefix_cached_llm.llm_engine.scheduler[0]
+# scheduler.offload_all_warmed()
+# print("Scheduler offloaded all warmed requests.")
+
+# # ----- REAL INFERENCE -----
+# req_id = scheduler.running[0].request_id if scheduler.running else generating_prompts[0].request_id
+# if scheduler.has_cpu_cache(req_id):
+#     scheduler.load_kv_cache(req_id)
 
 # Generate with prefix caching.
 outputs = prefix_cached_llm.generate(generating_prompts, sampling_params)
 
 print("Results with `enable_prefix_caching`")
-time2 = time()
+
 
 # Print the outputs.
 total = 0
@@ -170,4 +168,3 @@ for index, output in enumerate(outputs):
     #print(f"Prompt: {prompt!r}\n, Generated text: {generated_text!r}\n\n")
 
 print(f"generated text with the total length-{total}")
-print(f"Time taken: {time2 - time1:.2f} seconds")

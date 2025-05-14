@@ -137,6 +137,10 @@ class WorkerInput:
     virtual_engine: int = 0
 
     num_steps: int = 1
+    buffers_to_offload: Optional[torch.Tensor] = None
+    buffers_to_load: Optional[torch.Tensor] = None
+    immediate_allocate: bool = False
+    to_update_blocks: Optional[Dict[int, int]] = None
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -154,6 +158,8 @@ class WorkerInput:
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
             num_steps=tensor_dict.pop("num_steps"),
+            buffers_to_offload=tensor_dict.pop("buffers_to_offload"),
+            buffers_to_load=tensor_dict.pop("buffers_to_load"),
         )
 
     def as_broadcastable_tensor_dict(
@@ -169,6 +175,8 @@ class WorkerInput:
             "virtual_engine": self.virtual_engine,
             # new add for dattn
             "num_steps": self.num_steps,
+            "buffers_to_offload": self.buffers_to_offload,
+            "buffers_to_load": self.buffers_to_load,
         }
 
         return tensor_dict
@@ -321,11 +329,16 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
         if self.use_dattn:
-            to_swap_out_caches, to_swap_in_caches = self.execute_worker_dattn(worker_input)
+            to_swap_out_caches, to_swap_in_caches = self.execute_worker_dattn(worker_input)     # get the swap out and swap in caches
 
             # If any of these not zero
             if (execute_model_req.to_update_blocks or to_swap_out_caches or to_swap_in_caches or execute_model_req.immediate_alloc == True): 
-                # Perform the update cache blocks in a function. 
+                # Perform the update cache blocks in a function.   
+                 
+                # block_manager_dattn: find the blocks to swap out and swap in and update the cache blocks
+                # scheduler gets the blocks to swap out and swap in, then send it up to the worker
+                # worker.py/worker_base.py (gpu_worker) prepare_worker_input(), then send it to the Cache_Engine
+                # Cache_Engine.py/engine.py, then send it to the lower level of cuda, pybind, and then to the C++ code (Name: updateCacheBlocks)
                 self.update_cache_blocks(model_input.virtual_engine, execute_model_req.immediate_alloc,  execute_model_req.to_update_blocks, to_swap_out_caches, to_swap_in_caches)
         else:
             self.execute_worker(worker_input)

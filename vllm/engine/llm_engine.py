@@ -1215,7 +1215,7 @@ class LLMEngine:
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
         if not self._has_remaining_steps(seq_group_metadata_list):
-            # Schedule iteration, key information is stored in the context
+            # Schedule iteration, key information is stored in the context <- scheduler's output
             (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc
              ) = self.scheduler[virtual_engine].schedule()
@@ -1267,6 +1267,9 @@ class LLMEngine:
                 # dattn's support
                 immediate_alloc=scheduler_outputs.immediate_allocate, 
                 to_update_blocks=scheduler_outputs.to_update_blocks,
+                # dattn's bulk-KV list
+                buffers_to_offload=scheduler_outputs.buffers_to_offload,
+                buffers_to_load=scheduler_outputs.buffers_to_load,
                 )
 
             if allow_async_output_proc:

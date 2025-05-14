@@ -56,6 +56,7 @@ class SequenceStatus(enum.IntEnum):
     RUNNING = 1
     SWAPPED = 2
     SWAPPING = -1        # xmc: potential bug here
+    WARMED = -2
     # Note: anything after this will be considered
     # as a finished status.
     FINISHED_STOPPED = 3
@@ -1276,6 +1277,13 @@ class ExecuteModelRequest(
                                    int]] = msgspec.field(default_factory=list)
     # Blocks to copy. Source to dest block.
     blocks_to_copy: List[Tuple[int, int]] = msgspec.field(default_factory=list)
+    # Bulk continuous KV operations (dAttention)
+    buffers_to_offload: List[Tuple[int, int, int]] = msgspec.field(
+        default_factory=list
+    )  # [cache_id, cpu_start_block, n_blocks]
+    buffers_to_load: List[Tuple[int, int, int]] = msgspec.field(
+        default_factory=list
+    )
     # Virtual engine ID for pipeline parallel.
     virtual_engine: int = 0
     # The number of slots for lookahead decoding.
@@ -1333,6 +1341,8 @@ class ExecuteModelRequest(
             blocks_to_swap_in=self.blocks_to_swap_in.copy(),
             blocks_to_swap_out=self.blocks_to_swap_out.copy(),
             blocks_to_copy=self.blocks_to_copy.copy(),
+            buffers_to_offload=self.buffers_to_offload.copy(),
+            buffers_to_load=self.buffers_to_load.copy(),
             virtual_engine=self.virtual_engine,
             num_lookahead_slots=self.num_lookahead_slots,
             running_queue_size=self.running_queue_size,

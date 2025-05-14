@@ -84,4 +84,11 @@ class kvCacheAllocator:
                             to_swap_in: List[List[int]]):
         #print(f"before invoking updateCacheBlocks!!!!", file=sys.stderr)
         return self._allocator.updateCacheBlocks(immediate_allocate, to_update_blocks, to_swap_out, to_swap_in)
+
+    def copyKVCache(self, 
+                    gpu_cache_id: int,
+                    start_block: int,
+                    need_blocks: int,
+                    direction: str):
+        return self._allocator.copyKVCache(gpu_cache_id, start_block, need_blocks, direction)
      

@@ -17,6 +17,7 @@
 #include <pthread.h>
 
 #include "dattn.h"
+#include "core/registration.h"
 
 
 #define KV_UTILIZATION_RATE (0.9)
@@ -29,7 +30,27 @@ constexpr int64_t GIGABYTES=(MEGABYTES * 1024);
   In this allocator, we only have the following concepts, but without the concept of tokens.
   The python portion should convert the number of tokens to tokens depending on their cache_block_size (e.g., 16)
   Region: virtual address space for a request. Currently, we support the space for max_seq_len.
+
+
+  It does perform a "large memory pool" initialization, 
+  but unlike traditional cudaMalloc, it does not immediately request a large chunk of 
+  physical GPU memory. Instead, it uses the lower-level cuMemCreate / cuMemMap API:
+
+  1. cuMemCreate only creates an "allocation handle" for an unmapped memory object; 
+    it does not immediately allocate or occupy physical GPU memory, nor does it 
+    show up in nvidia-smi at this stage.
+
+  2. The actual usage of this physical memory occurs later when cuMemMap is called 
+    (e.g., in kvCacheRegion::updateBlocks). At this point, these memory handles are 
+    mapped to specific virtual address spaces, triggering the actual GPU memory 
+    allocation or commitment.
+
+  3. Allocation strategy: Since dAttention manages multiple PhysicalBlocks through 
+    a "block pool," the corresponding handle is only mapped to a virtual address 
+    (and thus physically occupies GPU memory) when more blocks are needed and 
+    updateBlocks is explicitly called.
  */
+
 static uint64_t roundup(uint64_t size, uint64_t align_size) {
   return ((size + align_size - 1)/align_size) * align_size; 
 }
@@ -143,7 +164,7 @@ void PhysicalBlocksManager::initialize(size_t max_allowed_size, size_t total_mem
     int64_t to_allocate_memory = min(total_memory, max_allowed_size); 
     this->total_size = to_allocate_memory; 
     size_t num_blocks = to_allocate_memory / block_size;
-    fprintf(stderr, "total_memory %lx, max_allowed_size-%lx num_blocks-%ld block_size-%ld\n", total_memory, max_allowed_size, num_blocks, block_size);
+    fprintf(stderr, "total_memory %ld, max_allowed_size-%ld num_blocks-%ld block_size-%ld\n", total_memory, max_allowed_size, num_blocks, block_size);
     _increase_blocks(num_blocks);
 }
 
@@ -421,7 +442,8 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_gpu_memory_size, int64_t cache_bl
 
     // Adding an explicit checking. 
     if(physical_block_size > 40*MEGABYTES) {
-      fprintf(stderr, "Invalid physical_block_size %lx, with cache_block_size-%lx!!", physical_block_size, cache_block_size);
+      fprintf(stderr, "physical_block_size: %ld is too large, with cache_block_size: %ld, page_size: %ld", physical_block_size, cache_block_size, page_size);
+      // fprintf(stderr, "Invalid physical_block_size %ld, with cache_block_size-%ld!!!!, page", physical_block_size, cache_block_size);
       exit(-1);
     }
   }
@@ -453,6 +475,113 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_gpu_memory_size, int64_t cache_bl
     exit(-1); 
   }
 }
+
+
+/*
+// Destructor: release all regions and mutex
+// Note that we don't need to release the physical memory, as it is managed by the block manager
+// and will be released when the block manager is destructed.
+kvCacheAllocator::~kvCacheAllocator() {
+  // Release all regions
+  for(auto region : this->active_regions_map) {
+    delete region.second; 
+  }
+  this->active_regions_map.clear(); 
+
+  // Release the CPU cache
+  if(this->cpu_cache_ptr != nullptr) {
+    cudaFreeHost(this->cpu_cache_ptr);
+    this->cpu_cache_ptr = nullptr; 
+  }
+
+  // Release the mutex and condition
+  pthread_mutex_destroy(&mutex_manager); 
+  pthread_cond_destroy(&cond_manager); 
+
+  // Release the block manager
+  _block_manager.cleanup();
+}
+*/
+
+// 新增辅助函数：根据 gpu_cache_id 返回 GPU 内存指针
+void* kvCacheAllocator::getGPUBasePtr(int gpu_cache_id) {
+  if (this->active_regions_map.find(gpu_cache_id) != this->active_regions_map.end()) {
+      kvCacheRegion* region = this->active_regions_map[gpu_cache_id];
+      // 利用 getStartPtr() 获取该 region 的起始 GPU 指针
+      return reinterpret_cast<void*>(region->getStartPtr());
+  }
+  printf("[getGPUBasePtr] Error: No region found for gpu_cache_id=%d\n", gpu_cache_id);
+  return nullptr;
+}
+
+// 新增辅助函数：根据 start_block 返回 CPU 内存指针
+void* kvCacheAllocator::getCPUBasePtr(int start_block) {
+  if (this->cpu_cache_ptr == nullptr) {
+      printf("[getCPUBasePtr] Error: CPU cache not allocated!\n");
+      return nullptr;
+  }
+  // 假设 cache_block_size 表示单个 block 的大小（字节数）
+  return reinterpret_cast<void*>(reinterpret_cast<char*>(this->cpu_cache_ptr) + start_block * (this->cache_block_size));
+}
+
+// implement copyKVCache() interface
+bool kvCacheAllocator::copyKVCache(int64_t gpu_cache_id,
+                                 int64_t start_block,
+                                 int64_t need_blocks,
+                                 const std::string &direction) {
+  // 打印调试信息，确认函数调用
+  printf("[copyKVCache] called with gpu_cache_id=%d, start_block=%d, need_blocks=%d, direction=%s\n",
+         gpu_cache_id, start_block, need_blocks, direction.c_str());
+  
+  // 1) 获取 GPU 端的基地址
+  void* gpu_ptr = getGPUBasePtr(gpu_cache_id);
+  if (!gpu_ptr) {
+      printf("[copyKVCache] Error: getGPUBasePtr returned null for cache_id=%d\n", gpu_cache_id);
+      return false;
+  }
+  
+  // 2) 获取 CPU 端的基地址
+  void* cpu_ptr = getCPUBasePtr(start_block);
+  if (!cpu_ptr) {
+      printf("[copyKVCache] Error: getCPUBasePtr returned null for start_block=%d\n", start_block);
+      return false;
+  }
+  
+  // 3) 计算需要拷贝的总字节数：need_blocks * cache_block_size
+  size_t bytes_to_copy = static_cast<size_t>(need_blocks) * static_cast<size_t>(this->cache_block_size);
+  
+  // 4) 根据 direction 判断拷贝方向
+  cudaMemcpyKind kind;
+  if (direction == "GPU2CPU") {
+      kind = cudaMemcpyDeviceToHost;
+  } else if (direction == "CPU2GPU") {
+      kind = cudaMemcpyHostToDevice;
+  } else {
+      printf("[copyKVCache] Error: unknown direction '%s'\n", direction.c_str());
+      return false;
+  }
+  
+  printf("[copyKVCache] Starting cudaMemcpy of %zu bytes, direction=%s, cpu_ptr=%p, gpu_ptr=%p\n",
+    bytes_to_copy, direction.c_str(), cpu_ptr, gpu_ptr);
+  
+  // 5) 执行一次性拷贝
+  cudaError_t err = cudaMemcpy(
+      (direction == "GPU2CPU" ? cpu_ptr : gpu_ptr),
+      (direction == "GPU2CPU" ? gpu_ptr : cpu_ptr),
+      bytes_to_copy,
+      kind
+  );
+  
+  // 6) 检查拷贝是否成功
+  if (err != cudaSuccess) {
+      printf("[copyKVCache] cudaMemcpy failed: %s\n", cudaGetErrorString(err));
+      return false;
+  }
+  
+  printf("[copyKVCache] Successfully copied %zu bytes %s\n", bytes_to_copy, direction.c_str());
+  return true;
+}
+
 
 int64_t kvCacheAllocator::getPageSize() {
   return this->page_size;
@@ -494,7 +623,9 @@ int64_t kvCacheAllocator::allocCPUCache(int64_t cache_size) {
     std::cerr << "cudaHostAlloc failed: " << cudaGetErrorString(err) << std::endl;
     exit(-1);
   }
-
+  // save allocated address to kvCacheAllocator::cpu_cache_ptr. it would be used to find the cpu address during offloading
+  // fprintf(stderr, "allocCPUCache address: %p\n", address);
+  this->cpu_cache_ptr = address;
   return (int64_t)address; 
 }
 

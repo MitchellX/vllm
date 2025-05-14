@@ -7,7 +7,11 @@
 
 from transformers import pipeline, set_seed
 from vllm import LLM, SamplingParams
-from time import time
+import os
+import time
+os.environ['VLLM_ATTENTION_BACKEND'] = 'XFORMERS'
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com' 
+set_seed(32)
 
 # Common prefix.
 prefix = (
@@ -99,66 +103,65 @@ prefix = (
     "user expectations."
 )
 
-# Sample prompts.
+
 prompts = [
     " I want you to act as a storyteller. You will come up with entertaining stories that are engaging, imaginative and captivating for the audience. It can be fairy tales, educational stories or any other type of stories which has the potential to capture people’s attention and imagination. Depending on the target audience, you may choose specific themes or topics for your storytelling session e.g., if it’s children then you can talk about animals; If it’s adults then history-based tales might engage them better etc. My first request is “I need an interesting story on perseverance.",
-    "Please write a paper of no less than 4,000 words based on the following abstract. You can firstly write the background and then do the literature review. In the domain of multimedia and multimodal processing, the efficient handling of diverse data streams-such as images, video, and sensor data-is paramount. Model compression and multitask learning (MTL) are crucial in this field, offering the potential to address the resource-intensive demands of processing and interpreting multiple forms of media simultaneously. However, effectively compressing a multitask model presents significant challenges due to the complexities of balancing sparsity allocation and accuracy performance across multiple tasks. ",
-    " I want you to act as an advertiser. You will create a campaign to promote a product or service of your choice. You will choose a target audience, develop key messages and slogans, select the media channels for promotion, and decide on any additional activities needed to reach your goals. My first suggestion request is “I need help creating an advertising campaign for a new type of energy drink targeting young adults aged 18-30.”",
-    "I want you to act as a travel guide. I will write you my location and you will suggest a place to visit near my location. In some cases, I will also give you the type of places I will visit. You will also suggest me places of similar type that are close to my first location. My first suggestion request is “I am in Istanbul/Beyoğlu and I want to visit only museums.”",
 ]
 
-# prompts = [
-#     " I want you to act as a storyteller. You will come up with entertaining stories that are engaging, imaginative and captivating for the audience. It can be fairy tales, educational stories or any other type of stories which has the potential to capture people’s attention and imagination. Depending on the target audience, you may choose specific themes or topics for your storytelling session e.g., if it’s children then you can talk about animals; If it’s adults then history-based tales might engage them better etc. My first request is “I need an interesting story on perseverance.",
-# ]
+prompts = [prefix + prompt for prompt in prompts]
+
+warmup_params = SamplingParams(temperature=0, top_p=1, top_k=1, max_tokens=1)   # 只 Prefill
+sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1, max_tokens=16)
 
 
+llm = LLM(model="facebook/opt-6.7b",
+                        use_dattn=True,
+                        enforce_eager=True,
+                        preemption_mode="swap",         # [RECOMPUTE, SWAP]
+                        enable_prefix_caching=False)
 
-# prompts = prompts * 1
-# prompts = prompts * 4
-prompts = prompts * 8
-# prompts = prompts * 10
-# prompts = prompts * 15
+# ---------- 4. WARM-UP phase: prefill ----------
+t0 = time.time()
+llm.generate(prompts, warmup_params)
+t_prefill = time.time() - t0
+print(f"[warm-up] prefill+1tok latency: {t_prefill:.3f}s")
 
-generating_prompts = [prefix + prompt for prompt in prompts]
-generating_prompts = prompts
+# ---------- 5. OFFLOAD KV  ----------
+sched = llm.llm_engine.scheduler[0]    # single GPU worker
+sched.offload_all_warmed()             # GPU → CPU (one memcpy)
+print("[warm-up] offload done")
 
-
-set_seed(32)
-
-import os
-os.environ['VLLM_ATTENTION_BACKEND'] = 'XFORMERS'
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com' 
-
-# Create a sampling params object.
-#sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=8192, ignore_eos=True)
-#sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=8192, ignore_eos=True)
-#sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=2048)
-#sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=2048)
-sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=16)
-# sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1, max_tokens=2048, )
-
-# Create an LLM.
-#llm = LLM(model="facebook/opt-6.7b")
-#llm = LLM(model="facebook/opt-6.7b", use_dattn=True)
-#llm = LLM(model="facebook/opt-6.7b", use_dattn=True, enforce_eager=True)
-#llm = LLM(model="Qwen/Qwen-7B", use_dattn=True, trust_remote_code=True, enforce_eager=True, preemption_mode="swap")
-# llm = LLM(model="facebook/opt-2.7B", use_dattn=True, enforce_eager=True, preemption_mode="swap", enable_prefix_caching=False)
-prefix_cached_llm = LLM(model="facebook/opt-6.7b", use_dattn=True,  enforce_eager=True, preemption_mode="swap",enable_prefix_caching=False) # [RECOMPUTE, SWAP]
+# 5.5 Add one empty engine step right after off‑loading:
+llm.llm_engine.step()               # <-- let Worker execute it
+print("[warm‑up] extra step done")
 
 
-time1 = time()
-# Warmup so that the shared prompt's KV cache is computed.
-# prefix_cached_llm.generate(generating_prompts[0], sampling_params)
+# ---------- 6. (OPTIONAL) inspect offload info ----------
+rid_warmed = sched.warmed[0].request_id       # ??? should we put this in the swapped list?
+print("offload map:", sched._offloaded_kv_info)
+print("warmed rid:", rid_warmed)
 
-# prefix_cached_llm.llm_engine.scheduler[0].block_manager.offload_cache_to_cpu()
-# block_manager = prefix_cached_llm.llm_engine.scheduler[0].block_manager
+# ---------- 7. LOAD KV before real inference ----------
+# After offload
+if sched._offloaded_kv_info:
+    rid = next(iter(sched._offloaded_kv_info))
+    if sched.has_cpu_cache(rid):
+        sched.load_kv_cache(rid)
+        print("[load] KV loaded back to GPU")
+else:
+    print("No CPU cache to load – offload may have failed.")
 
-# Generate with prefix caching.
-outputs = prefix_cached_llm.generate(generating_prompts, sampling_params)
+llm.llm_engine.step()               # <-- let Worker execute it
+print("[load] extra step done")
+
+# ---------- 8. REAL inference ----------
+t1 = time.time()
+outputs = llm.generate(prompts, sampling_params)
+t_decode = time.time() - t1
+print(f"[run] decode latency: {t_decode:.3f}s")
+
 
 print("Results with `enable_prefix_caching`")
-time2 = time()
-
 # Print the outputs.
 total = 0
 for index, output in enumerate(outputs):
@@ -170,4 +173,3 @@ for index, output in enumerate(outputs):
     #print(f"Prompt: {prompt!r}\n, Generated text: {generated_text!r}\n\n")
 
 print(f"generated text with the total length-{total}")
-print(f"Time taken: {time2 - time1:.2f} seconds")

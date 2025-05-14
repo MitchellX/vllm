@@ -141,6 +141,9 @@ class SchedulerOutputs:
     # dattn support
     to_update_blocks: Dict[int, int] = field(default_factory=dict)
     immediate_allocate: bool = False
+    
+    buffers_to_offload: List[Tuple[int, int, int]] = field(default_factory=list)  # [cache_id, cpu_start_block, n_blocks]
+    buffers_to_load: List[Tuple[int, int, int]] = field(default_factory=list)
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
@@ -156,7 +159,11 @@ class SchedulerOutputs:
     def is_empty(self) -> bool:
         # NOTE: We do not consider the ignored sequence groups.
         return (not self.scheduled_seq_groups and not self.blocks_to_swap_in
-                and not self.blocks_to_swap_out and not self.blocks_to_copy)
+                and not self.blocks_to_swap_out and not self.blocks_to_copy
+                # scheduler_outputs.is_empty() will return False whenever there is a pending off‑load or load request
+                and len(self.buffers_to_offload) == 0     # ← add
+                and len(self.buffers_to_load) == 0        # ← add
+                )
 
     def _sort_by_lora_ids(self):
         self.scheduled_seq_groups = sorted(
@@ -406,6 +413,12 @@ class Scheduler:
 
         # Sequence groups in swapping_out 
         self.swapping_out: Deque[SequenceGroup] = deque()
+        
+        # 序列组在 prefill 结束后（KV 仍在 GPU）进入的队列
+        self.warmed: Deque[SequenceGroup] = deque()
+
+        # {request_id: (cpu_start_block, num_blocks)}
+        self._offloaded_kv_info: Dict[str, Tuple[int, int]] = {}
 
         # Sequence groups finished requests ids since last step iteration.
         # It lets the model know that any state associated with these requests
@@ -1097,7 +1110,7 @@ class Scheduler:
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
         # Queue requests that couldn't be scheduled.
-        waiting_queue.extendleft(leftover_waiting_sequences)
+        waiting_queue.extendleft(leftover_waiting_sequences)        
         if len(seq_groups) > 0:
             self.prev_prompt = True
         # return seq_groups
@@ -1218,6 +1231,9 @@ class Scheduler:
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
             running_queue_size=len(self.running),
             preempted=preempted,
+            buffers_to_offload=self.block_manager.buffers_to_offload,
+            buffers_to_load=self.block_manager.buffers_to_load,
+
         )
 
     def _schedule_chunked_prefill(self) -> SchedulerOutputs:
@@ -1306,6 +1322,8 @@ class Scheduler:
             running_queue_size=len(self.running),
             preempted=(len(running_scheduled.preempted) +
                        len(running_scheduled.swapped_out)),
+            buffers_to_offload=self.block_manager.buffers_to_offload,
+            buffers_to_load=self.block_manager.buffers_to_load,
         )
 
     def _schedule(self) -> SchedulerOutputs:
@@ -1357,7 +1375,9 @@ class Scheduler:
         is_prefill = False
         if self.use_dattn:
             # Collect the information related to cache update for dattn
-            scheduler_outputs.to_update_blocks, scheduler_outputs.immediate_allocate = self.block_manager.step()
+            # scheduler_outputs.to_update_blocks, scheduler_outputs.immediate_allocate = self.block_manager.step()
+            (scheduler_outputs.to_update_blocks, scheduler_outputs.immediate_allocate, 
+            scheduler_outputs.buffers_to_offload, scheduler_outputs.buffers_to_load) = self.block_manager.step()
 
             # When there is no active requests, we will need to change immediate_allocate to be True
             if self.has_active_seqs() == False:
@@ -1542,6 +1562,30 @@ class Scheduler:
         self._free_finished_seqs(seq_group)
 
     def free_finished_seq_groups(self) -> None:
+        """
+        Free finished sequence groups, handling dAttention warm-up support.
+        """
+        if self.use_dattn:
+            # --- dAttention warm‑up support -----------------------------------
+            # Move sequence‑groups that have *just finished* the warm‑up prefill
+            # (KV still on GPU) into the `warmed` queue instead of freeing them,
+            # so that `offload_all_warmed()` can later off‑load their KV cache.
+            just_prefilled: List[SequenceGroup] = []
+            for sg in list(self.running):
+                if sg.is_finished():
+                    just_prefilled.append(sg)
+
+            for sg in just_prefilled:
+                # Remove from running and push to warmed
+                if sg in self.running:
+                    self.running.remove(sg)
+                self.warmed.append(sg)
+                # We do *not* free KV blocks here; offload_all_warmed() will handle.
+                for seq in sg.get_seqs():
+                    seq.status = SequenceStatus.RUNNING  # keep as running-like
+            # ------------------------------------------------------------------
+
+        # -------- Step‑B: 释放真正完成的请求 --------
         remaining: Deque[SequenceGroup] = deque()
         for seq_group in self.running:
             self._free_finished_seq_group(seq_group)
@@ -1798,3 +1842,54 @@ class Scheduler:
             else:
                 num_new_tokens = min(num_new_tokens, remaining_token_budget)
         return num_new_tokens
+
+
+    def offload_all_warmed(self) -> None:
+        """
+        GPU → CPU off‑load for every SequenceGroup in `self.warmed`.
+
+        * Calls block_manager.offload_cache_to_cpu().
+        * Records (cpu_start_block, num_blocks) in _offloaded_kv_info.
+        * Leaves the group in self.warmed so scheduler will NOT auto swap‑in.
+        """
+        for sg in list(self.warmed):
+            info = self.block_manager.offload_cache_to_cpu(sg)
+            if info is None:
+                continue
+            cpu_start, num_blocks = info
+            self._offloaded_kv_info[sg.request_id] = (cpu_start, num_blocks)
+
+            # Mark status but do NOT push to self.swapped
+            for seq in sg.get_seqs():
+                seq.status = SequenceStatus.SWAPPED
+                
+                
+    def has_cpu_cache(self, request_id: str) -> bool:
+        """判断某 request 的 KV 是否已在 CPU。"""
+        return request_id in self._offloaded_kv_info
+
+
+    def load_kv_cache(self, request_id: str) -> None:
+        """
+        CPU → GPU load of a previously off‑loaded prefix KV.
+
+        * Reserves GPU cache via block_manager.load_cache_from_cpu().
+        * Moves the group from warmed → swapping_in so that
+        _schedule_swapped_async will perform the real swap‑in.
+        """
+        if request_id not in self._offloaded_kv_info:
+            logger.warning("[Scheduler] no offloaded KV for %s", request_id)
+            return
+
+        sg = next((g for g in self.warmed if g.request_id == request_id), None)
+        if sg is None:
+            logger.error("[Scheduler] warmed queue lost %s", request_id)
+            return
+
+        # Ask BlockManager to queue CPU→GPU memcpy
+        self.block_manager.load_cache_from_cpu(sg)
+
+        # Move queues
+        self.warmed.remove(sg)
+        self.swapping_in.append(sg)
+        sg.swapping_step_index = self.step_index

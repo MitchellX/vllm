@@ -93,6 +93,9 @@ private:
   int64_t cache_block_size;
   int64_t physical_block_size; 
   uint64_t page_size;
+
+  void* cpu_cache_ptr;
+    
   CUdevice device;
   std::mutex mutex;
 
@@ -141,5 +144,8 @@ public:
   void swapOutCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream); 
   void swapInCache(std::vector<std::vector<int64_t>> swap_caches, cudaStream_t stream); 
 
+  bool copyKVCache(int64_t gpu_cache_id, int64_t start_block, int64_t need_blocks, const std::string &direction);
+  void* getCPUBasePtr(int start_block);
+  void* getGPUBasePtr(int gpu_cache_id);
 };
 

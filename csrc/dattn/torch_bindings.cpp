@@ -15,7 +15,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
     .def("reserveRegion", &kvCacheAllocator::reserveRegion)
     .def("allocCPUCache", &kvCacheAllocator::allocCPUCache)
     .def("releaseRegions", &kvCacheAllocator::releaseRegions)
-    .def("updateCacheBlocks", &kvCacheAllocator::updateCacheBlocks);
+    .def("updateCacheBlocks", &kvCacheAllocator::updateCacheBlocks)
+    // for KV cache offloading from GPU to CPU
+    .def("copyKVCache", &kvCacheAllocator::copyKVCache);
+
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

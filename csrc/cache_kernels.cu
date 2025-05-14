@@ -53,6 +53,8 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   
   // NOTE(woosuk): This can be slow if the number of blocks is large.
+  // [figure] Inside the loop, the function calls cudaMemcpyAsync to copy each block individually 
+  // from the source offset to the destination offset along the current CUDA stream.
   const int64_t num_blocks = block_mapping.size(0);
   for (size_t i = 0; i < num_blocks; i++) {
     int64_t src_block_number = block_mapping[i][0].item<int64_t>();

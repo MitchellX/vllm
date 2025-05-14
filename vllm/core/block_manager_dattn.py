@@ -188,6 +188,10 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         # Track the step information, used for periodical memory management
         self.step_index = 0
         
+        # Buffers to offload and load between CPU and GPU, invoked by block_mgr.offload_cache_to_cpu() <- scheduler
+        self.buffers_to_offload: List[List[int]] = []
+        self.buffers_to_load: List[List[int]] = []
+        
         self.continuous_later_count = 0  # Add counter for tracking continuous LATER returns in can_swap_in()
     
     def _predict_n_blocks(self, tokens: int) -> int:
@@ -257,7 +261,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         # print(f"Prefill: allocate sequence-{seq.seq_id} at step_index-{self.step_index}, need_blocks:{need_blocks}, tokens:{seq.get_len()}", file=sys.stderr) 
         cache_id = self._allocate_gpu_cache(need_blocks)
         
-        seq.cache_id = cache_id
+        seq.cache_id = cache_id         # cache_id is the id of the allocated cache, which is writen to the seq object
         seq.data.cache_id = cache_id
 
     #  Allocate a new GPU cache, when the available GPU blocks are sufficient
@@ -409,7 +413,9 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # if self.continuous_later_count > self.vmm_frequency:
             #     self.step_index += 1
             #     self.continuous_later_count = 0  # Reset counter
-            # self.step_index += 1                
+                
+            # # another way to avoid infinite True returned
+            self.step_index += 1                
             return AllocStatus.LATER
 
         # Reset counter when we don't return LATER
@@ -584,7 +590,18 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # No need to invoke virtual memory management
             self.step_index += 1
             #print(f"step-{self.step_index}, no need to do updates, self.num_free_gpu_blocks:{self.num_free_gpu_blocks}", file=sys.stderr) 
-            return to_update_blocks, immediate_allocate
+            # return to_update_blocks, immediate_allocate
+            
+            # —— 在 return 之前保存两张列表 —— 
+            bufs_off  = self.buffers_to_offload
+            bufs_load = self.buffers_to_load
+
+            # -------- 清空放到最后 ----------
+            self.buffers_to_offload = []
+            self.buffers_to_load = []
+
+            return to_update_blocks, immediate_allocate, \
+                    bufs_off, bufs_load
 
         #immediate_allocate = True
         # In the following, we place to_free_blocks in the header of to_update_blocks, which 
@@ -632,8 +649,126 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         if immediate_allocate == False:
             self.step_index += 1  
             
-        
-        return to_update_blocks, immediate_allocate
+        # return to_update_blocks, immediate_allocate
+        # —— 在 return 之前保存两张列表 —— 
+        bufs_off  = self.buffers_to_offload
+        bufs_load = self.buffers_to_load
+
+        # -------- 清空放到最后 ----------
+        self.buffers_to_offload = []
+        self.buffers_to_load = []
+
+        return to_update_blocks, immediate_allocate, \
+                bufs_off, bufs_load
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return 0
+    
+    
+    # ------------------------------------------------------------
+    def offload_cache_to_cpu(
+        self, 
+        seq_group: SequenceGroup
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Move *all* KV blocks of `seq_group` from GPU to CPU in one shot.
+
+        Returns
+        -------
+        (cpu_start_block, num_blocks)  if succeed
+        None                           if allocation/Memcpy failed
+        """
+        # NOTE: actual memcpy is deferred to Worker via buffers_to_* list
+        # 目前假设一个 seq_group 只有 1 条 decoder seq
+        seq = seq_group.seqs[0]
+        gpu_cache_id = seq.cache_id
+
+        # 1) 要拷贝的 block 数
+        if gpu_cache_id in self.to_free_gpu_caches:
+            # 已经标记为将被回收的缓存，真实块数记录在 to_free_gpu_caches
+            num_blocks = self.to_free_gpu_caches[gpu_cache_id]
+        else:
+            # 正常运行中的缓存，从 allocated_gpu_blocks 读取
+            num_blocks = self.allocated_gpu_blocks.get(gpu_cache_id, 0)
+        if num_blocks == 0:
+            logger.warning("offload_cache_to_cpu: cache %d has 0 blocks", gpu_cache_id)
+            return None
+
+        # 2) 在 CPU allocator 上申请连续 block
+        cpu_start_block = self.cpu_allocator.allocate(num_blocks)
+        if cpu_start_block is None:
+            logger.error("[offload] CPU block alloc failed  (need %d)", num_blocks)
+            return None
+
+        # 3) 记录三元组，等待 Worker 在下一步执行 GPU→CPU memcpy
+        self.buffers_to_offload.append(
+            [gpu_cache_id, cpu_start_block, num_blocks]
+        )
+
+        # 4) 注册 swapped‑out 记录
+        self.swapped_out_caches[seq.seq_id] = SwappedCPUCache(
+            cpu_start_block, num_blocks
+        )
+        # 更新计数
+        self.num_free_cpu_blocks -= num_blocks
+
+        # 5) 释放 GPU cache（放到 to_free_gpu_caches 统一回收）
+        self._free_cache(gpu_cache_id)
+
+        logger.info(
+            "[offload] seq_id=%d  gpu_cache=%d  -> CPU blocks [%d, %d]  (%d blk)",
+            seq.seq_id, gpu_cache_id,
+            cpu_start_block, cpu_start_block + num_blocks - 1,
+            num_blocks,
+        )
+        return (cpu_start_block, num_blocks)
+
+    # ------------------------------------------------------------
+    #  从 CPU 连续区一次性加载 KV 回 GPU
+    # ------------------------------------------------------------
+    def load_cache_from_cpu(
+        self,
+        seq_group: SequenceGroup
+    ) -> Optional[Tuple[int, int]]:
+        """
+        Copy will be issued later by Worker; this function only reserves
+        GPU cache and produces buffers_to_load entry.
+        Returns (cpu_start_block, num_blocks) if succeed, else None.
+        """
+        # NOTE: actual memcpy is deferred to Worker via buffers_to_* list
+        seq = seq_group.seqs[0]
+        seq_id = seq.seq_id
+
+        if seq_id not in self.swapped_out_caches:
+            logger.warning("[load] seq_id=%d has no swapped KV", seq_id)
+            return None
+
+        cpu_cache = self.swapped_out_caches[seq_id]
+        cpu_start_block = cpu_cache.start_block
+        num_blocks = cpu_cache.blocks
+
+        # Allocate a fresh GPU cache *of exact size*
+        gpu_cache_id = self._allocate_gpu_cache(num_blocks)
+        seq.cache_id = gpu_cache_id
+        seq.data.cache_id = gpu_cache_id
+
+        # Tell Worker to allocate that many blocks
+        self.to_allocate_blocks[gpu_cache_id] = num_blocks
+        self.immediate_allocate = True      
+          
+        # 让 Worker 在下一步执行 CPU→GPU memcpy
+        self.buffers_to_load.append(
+            [gpu_cache_id, cpu_start_block, num_blocks]
+        )
+
+        # # 更新 CPU allocator / counters
+        # self.cpu_allocator.free(cpu_start_block)
+        # self.num_free_cpu_blocks += num_blocks
+        # del self.swapped_out_caches[seq_id]
+
+        logger.info(
+            "[load] seq_id=%d  cpu_blk=[%d,%d] (%d) -> gpu_cache=%d",
+            seq_id, cpu_start_block, cpu_start_block + num_blocks - 1,
+            num_blocks, gpu_cache_id,
+        )
+        return (cpu_start_block, num_blocks)

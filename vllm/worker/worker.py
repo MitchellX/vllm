@@ -348,6 +348,19 @@ class Worker(LocalOrDistributedWorkerBase):
                                       device=self.device,
                                       dtype=torch.int64).view(-1, 2)
 
+        # buffers_to_offload and buffers_to_load are always lists of lists
+        buffers_to_offload = torch.tensor(
+            execute_model_req.buffers_to_offload,
+            device="cpu",
+            dtype=torch.int64)
+        buffers_to_load = torch.tensor(
+            execute_model_req.buffers_to_load,
+            device="cpu",
+            dtype=torch.int64)
+
+        immediate_allocate = execute_model_req.immediate_alloc
+        to_update_blocks = execute_model_req.to_update_blocks
+
         return WorkerInput(
             num_seq_groups=num_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
@@ -355,6 +368,10 @@ class Worker(LocalOrDistributedWorkerBase):
             blocks_to_copy=blocks_to_copy,
             virtual_engine=virtual_engine,
             num_steps=num_steps,
+            buffers_to_offload=buffers_to_offload,
+            buffers_to_load=buffers_to_load,
+            immediate_allocate=immediate_allocate,
+            to_update_blocks=to_update_blocks,
         )
 
     @torch.inference_mode()
@@ -363,16 +380,34 @@ class Worker(LocalOrDistributedWorkerBase):
 
     @torch.inference_mode()
     def execute_worker_dattn(self, worker_input: WorkerInput) -> Tuple[List[List[int]], List[List[int]]]:
-        #print(f"NOOOOOW, execute_worker before swapin and swapout")
+        # Reordered: allocations before load_buffers, frees after offload_buffers
         virtual_engine = worker_input.virtual_engine
-        to_swap_out = None
-        to_swap_in  = None
-        if worker_input.blocks_to_swap_out is not None:
+
+        if len(worker_input.buffers_to_offload) > 0:
+            self.cache_engine[virtual_engine].offload_buffers(
+                worker_input.buffers_to_offload)
+            
+        to_swap_out, to_swap_in = [], []
+        if len(worker_input.blocks_to_swap_out) > 0:
             to_swap_out = self.cache_engine[virtual_engine].swap_out(
-                           worker_input.blocks_to_swap_out)
-        if worker_input.blocks_to_swap_in is not None:
+                worker_input.blocks_to_swap_out)
+
+        if len(worker_input.blocks_to_swap_in) > 0:
             to_swap_in = self.cache_engine[virtual_engine].swap_in(
-                         worker_input.blocks_to_swap_in)
+                worker_input.blocks_to_swap_in)
+
+        # Allocate cache blocks on GPU first if we need to call MemCpy() in load_buffers()
+        if worker_input.immediate_allocate and worker_input.to_update_blocks:
+            self.update_cache_blocks(
+                virtual_engine,
+                True,  # allocate now
+                worker_input.to_update_blocks,
+                [], [],  # no swap lists yet
+            )
+
+        if len(worker_input.buffers_to_load) > 0:
+            self.cache_engine[virtual_engine].load_buffers(
+                worker_input.buffers_to_load)
 
         return to_swap_out, to_swap_in
  
@@ -393,6 +428,23 @@ class Worker(LocalOrDistributedWorkerBase):
         if (worker_input.blocks_to_copy is not None
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
+        '''
+        # Offload/load buffers if requested
+        if (worker_input.buffers_to_offload is not None
+                and worker_input.buffers_to_offload.numel() > 0):
+            self.cache_engine[virtual_engine].offload_buffers(
+                worker_input.buffers_to_offload)
+        
+        # debug test
+        gpu_id, cpu_start, nblk = worker_input.buffers_to_load[0].tolist()
+        print("[DBG] about to copy, cid", gpu_id,
+            "mapped?", self.cache_engine[0].device_cache_allocator.has_ptr(gpu_id))
+        
+        if (worker_input.buffers_to_load is not None
+                and worker_input.buffers_to_load.numel() > 0):
+            self.cache_engine[virtual_engine].load_buffers(
+                worker_input.buffers_to_load)
+        '''
 
     def _get_cached_seq_group_metadata(
             self,

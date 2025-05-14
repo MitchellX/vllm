@@ -715,6 +715,8 @@ class LLM:
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
+        cnt = 0
+        
         while self.llm_engine.has_unfinished_requests():
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
@@ -724,6 +726,10 @@ class LLM:
                         if isinstance(output, RequestOutput):
                             # Calculate tokens only for RequestOutput
                             assert output.prompt_token_ids is not None
+                            cnt += 1
+                            if cnt <5:
+                                print(pbar.format_dict["elapsed"])
+                                print("output.prompt_token_ids len: ", len(output.prompt_token_ids))
                             total_in_toks += len(output.prompt_token_ids)
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
                             total_out_toks += sum(
@@ -737,6 +743,14 @@ class LLM:
 
         if use_tqdm:
             pbar.close()
+            
+        
+        # # if offload is enabled, we need to wait for the offload thread to finish
+        # if self.offload:
+        #     offload_info = self.llm_engine.scheduler[0].offload_kv_cache()
+        #     print(f"Offload succeeded: {offload_info}")
+
+        
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.

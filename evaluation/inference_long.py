@@ -23,14 +23,15 @@ prompts = [
 
 
 # prompts = prompts * 4
-# prompts = prompts * 8
-prompts = prompts * 10
+prompts = prompts * 8
+# prompts = prompts * 10
 # prompts = prompts * 40
 set_seed(32)
 
 import os
 os.environ['VLLM_ATTENTION_BACKEND'] = 'XFORMERS'
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com' 
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 # Create a sampling params object.
 #sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=8192, ignore_eos=True)
@@ -47,7 +48,7 @@ sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=512)
 #llm = LLM(model="facebook/opt-6.7b", use_dattn=True, enforce_eager=True)
 #llm = LLM(model="Qwen/Qwen-7B", use_dattn=True, trust_remote_code=True, enforce_eager=True, preemption_mode="swap")
 # llm = LLM(model="facebook/opt-2.7B", use_dattn=True, enforce_eager=True, preemption_mode="swap", enable_prefix_caching=False)
-llm = LLM(model="facebook/opt-6.7b", use_dattn=False,  enforce_eager=True, preemption_mode="swap") # [RECOMPUTE, SWAP]
+llm = LLM(model="facebook/opt-6.7b", use_dattn=True,  enforce_eager=True, preemption_mode="swap") # [RECOMPUTE, SWAP]
 # llm = LLM(model="meta-llama/Llama-2-7b-chat-hf", use_dattn=True,  enforce_eager=True, preemption_mode="swap")
 #llm = LLM(model="facebook/opt-6.7b", enforce_eager=True)
 #llm = LLM(model="facebook/opt-6.7b", enforce_eager=True, preemption_mode="swap")
